@@ -1,0 +1,32 @@
+---
+title: "Annonymisation of the Survival data"
+author: "Rasmus Rask Kragh Jørgensen"
+date: "13/4/2022"
+output: html_document
+---
+
+
+# Annonymisation of Survival Data 
+
+One of the issues that's arising when working with survival data is that sensitive patients information, such as age, sex time of death, etc. is shared with unauthorized personnel. In the era of       
+
+```{r}
+library(survival)
+library(survminer)
+data(cancer, package="survival")
+```
+
+
+
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(time, status) ~ sex, data = lung), 
+    xlab = "Days", 
+    ylab = "Overall survival probability")
+```
+```{r}
+
+coxph(Surv(time,status)~age+sex+ph.ecog+ph.karno+wt.loss,data=lung )
+
+```
+
