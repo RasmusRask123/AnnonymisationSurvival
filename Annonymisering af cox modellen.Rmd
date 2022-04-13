@@ -5,28 +5,178 @@ date: "13/4/2022"
 output: html_document
 ---
 
+One of the issues that's arising when working with survival data is that sensitive patients information such as age, sex, time of death, censoring, etc. is shared with unauthorized personnel or third parties. Therefore, to help future researchers and contributes to not unconsciously share sensitive patient information, we will highlight some of the issues and how to succumb these.  
 
-# Annonymisation of Survival Data 
 
-One of the issues that's arising when working with survival data is that sensitive patients information, such as age, sex time of death, etc. is shared with unauthorized personnel. In the era of       
+### Kaplan-Meier plots
 
-```{r}
+Today we are using the classical lung dataset, and the following packages:
+
++ survival
++ survminer
++ tidyverse
++ pec
+
+
+```{r,warning=FALSE,message=FALSE}
 library(survival)
 library(survminer)
+library(tidyverse)
+library(pec)
 data(cancer, package="survival")
+
+#transforming status to 0 and 1 instead fo 2 and 1
+lung$status <- ifelse(lung$status==2,1,0)
+
+#Dividing dataset in train and test split
+train <- lung[1:160,]
+test <- lung[161:228,] 
+
 ```
-
-
 
 ```{r}
 ggsurvplot(
     fit = survfit(Surv(time, status) ~ sex, data = lung), 
     xlab = "Days", 
-    ylab = "Overall survival probability")
+    ylab = "Overall survival probability",
+    title="Kaplan-Meier curves stratified on Sex")
 ```
+
+```{r}
+surv_obj <- survfit(Surv(time, status) ~ sex, data = lung)
+
+surv_obj$n
+
+
+```
+
+### Predictive Studies
+
+In predictive studies it is quite important to validate the predictive model. Often these performance measures are calculated by a train/test split or though cross-validation. However to obtain a strong validity and to tests the models generalization external-validation is necessary. For example, a danish cancer prediction model for Overall survival, could be tested for generalization by applying it to Swedish or Norwegian data, considering the similarity of the countries. This is where issues arises, firstly accruing a new unused and similar quality data can be a long and cumbersome process, with rules and regulations, especially when crossing boarders. This issue could be solved by instead of accuering the new data, just sending a fixed model instead.
+
+Often Cox proportional hazards model are used to analyse survival data and to model overall survival. 
+The cox model is a semi-parametric regression model given by:
+
+$$h(t|X_i) = h_0(t) exp(\beta_1X_{i1}+ \cdots+ \beta_k X_{ik} ) $$
+It can be shown that the survival function can be given by:
+
+$$S_i(t|X_i) =S_0(t)exp(\beta X_i) $$
+were $S_0(t)= exp(\Lambda_0(t) ) $ and $\Lambda_0(t)$ is the cumulative baseline hazard. In R, the coxph function can be use to fit a cox model. as above to cox model consist of 2 parts, the covariates and relating coefficients, and then the cumulative baseline hazard. Its the later thats crusial for annonymisation.  
+
+```{r}
+cox_mod <- coxph(Surv(time,status)~age+sex+ph.ecog+ph.karno+wt.loss,data=train,x=T )
+cox_mod
+
+#We save the coeffiecents to be use later
+coef_dat <- coef(cox_mod) %>% as.matrix
+```
+Extracting the cumulative baseline hazard is stragiht forward with the basehaz function.
+```{r}
+baze_haz <- basehaz(cox_mod,centered = F) 
+baze_haz %>% head
+
+plot(baze_haz$time,baze_haz$hazard,type="s")
+
+```
+Note that the time variable is the excact time of death for patients. 
+
+### smootening of the cumulative baseline hazard
 ```{r}
 
-coxph(Surv(time,status)~age+sex+ph.ecog+ph.karno+wt.loss,data=lung )
+#We add "0" to make sure we have 0 hazard at time zero
+baze_haz <- rbind(c(.Machine$double.eps,.Machine$double.eps),baze_haz)
+
+#We convert the hazard and time to log scale, 
+baze_haz$hazard <- baze_haz$hazard %>% log
+baze_haz$time <- baze_haz$time %>% log
+
+#Fitting a spline to the log-scale baseline hazard
+fit <- smooth.spline(x =baze_haz$time ,y =baze_haz$hazard,keep.data = F,cv = T )
+
+#Making new estimates of the baselinehazard by the smoothed spline
+new_baze_haz <- predict(fit,x = log(seq(.Machine$double.eps,1000,1)) ) %>%
+                    do.call(what="cbind") %>%
+                    as.data.frame()
+
+colnames(new_baze_haz) <- c("Time","Hazard")
+
+new_baze_haz$Time <- new_baze_haz$Time %>% exp()
+new_baze_haz$Hazard <- new_baze_haz$Hazard %>% exp
+new_baze_haz %>% head
+
+baze_haz <- basehaz(cox_mod,centered = F)
+plot(baze_haz$time,baze_haz$hazard,type="s",
+     ylab="Baseline hazard",
+     xlab="time")
+lines(new_baze_haz$Time,new_baze_haz$Hazard,type="s",col="red")
+legend("bottomright",c("Actual baseline","smoothed baseline"),col = 1:2,fill=c("black","red") )
+
 
 ```
+
+As you can see the smoothed baseline hazard looks much nicer, without leaking patient information. Lets see how we are predicting.  
+
+```{r}
+#exstracting X*beta and h0
+h0 <- new_baze_haz$Hazard[1:366]
+X <- lung %>%  select(age,sex,ph.ecog,ph.karno,wt.loss) %>% as.matrix 
+
+#Calculating X*beta for each patient 
+XB <- X %*% coef_dat
+
+#Making predictions 
+pred_surv <- sapply(h0, function(x)exp(-x)^exp(XB)  ) %>% as.matrix()
+
+#Transforming the predictions to matrix format, colloums are predicted survival at time t
+#pred_surv <- do.call("cbind",pred_surv) %>% na.omit()#omitting patients with missing values
+
+
+```
+lets see how much of a difference from the actual cox obejct are from our annonymised cox-model
+
+
+```{r}
+test <- test %>%  select(time,status,age,sex,ph.ecog,ph.karno,wt.loss)  
+pred_cox <- predictSurvProb(cox_mod,newdata = test,times =seq(0,365,1) ) 
+
+
+X <- test %>%  select(age,sex,ph.ecog,ph.karno,wt.loss) %>% as.matrix 
+XB <- X %*% coef_dat
+
+#Making predictions 
+pred_surv <- sapply(h0, function(x)exp(-x)^exp(XB)  ) %>% as.matrix()
+
+
+
+pred_surv[1,] %>% as.matrix %>% plot(type="l",ylim=c(0,1),xlab="Time",ylab="OS")
+for (i in 1:10) {
+  lines(pred_surv[i,],col="red")
+  lines(pred_cox[i,],col="black")
+}
+
+```
+As we can see the predictions matches the actual cox predicted values 
+lets see performance measures on the lung dataset.  
+```{r}
+
+
+ibs(pec(pred_cox %>% na.omit,
+          data = test %>% na.omit,
+          times =  seq(0,365,1) ,
+                         exact= F,
+        formula = formula(Surv(time,status)~1) ,
+                         verbose = F,start=0),
+        times = 365  )[[2]]
+
+ibs(pec(pred_surv%>% na.omit,
+          data = test%>% na.omit,
+          times =  seq(0,365,1) ,
+                         exact= F,
+        formula = formula(Surv(time,status)~1) ,
+                         verbose = F,start=0),
+        times = 365  )[[2]]
+
+
+```
+Almost identical performance measures, on the test set
 
